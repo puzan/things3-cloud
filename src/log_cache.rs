@@ -37,7 +37,7 @@ struct StateCacheData {
     state: RawState,
 }
 
-const STATE_CACHE_VERSION: u8 = 3;
+const STATE_CACHE_VERSION: u8 = 4;
 
 fn read_cursor(path: &Path) -> CursorData {
     if !path.exists() {
@@ -276,6 +276,7 @@ pub fn sync_append_log_or_err(client: &mut ThingsCloudClient, cache_dir: &Path) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::ThingsId;
 
     #[test]
     fn state_cache_version_change_refolds_the_append_log() {
@@ -326,8 +327,32 @@ mod tests {
 
         assert_eq!(
             task.action_group,
-            Some(action_group_id.parse().expect("action-group ID"))
+            Some(ThingsId::from_wire(action_group_id).expect("action-group ID"))
         );
+    }
+
+    #[test]
+    fn fold_state_accepts_legacy_builtin_tag_ids() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = temp_dir.path();
+        let tag_id = "CC-Things-Tag-Important";
+        let area_id = "06B6F4C9-A15B-42CF-99A6-0E95E6C30568";
+        let log = [
+            format!(r#"{{"{tag_id}":{{"e":"Tag3","p":{{"ix":0,"pn":[],"sh":null,"tt":"Important"}},"t":0}}}}"#),
+            format!(r#"{{"{area_id}":{{"e":"Area2","p":{{"ix":0,"tg":[],"tt":"Home"}},"t":0}}}}"#),
+            format!(r#"{{"{area_id}":{{"e":"Area2","p":{{"tg":["{tag_id}"]}},"t":1}}}}"#),
+        ]
+        .join("\n")
+            + "\n";
+        fs::write(cache_dir.join("things.log"), log).expect("seed legacy log");
+
+        let state = fold_state_from_append_log(cache_dir).expect("fold legacy tag IDs");
+        let store = crate::store::ThingsStore::from_raw_state(&state);
+        let tag = ThingsId::from_wire(tag_id).expect("tag ID");
+        let area = store.get_area(area_id).expect("legacy area");
+
+        assert_eq!(area.tags, vec![tag.clone()]);
+        assert_eq!(store.resolve_tag_title(&tag), "Important");
     }
 
     #[test]

@@ -190,7 +190,7 @@ fn apply_update_payload(existing: &mut StateObject, payload: Properties) {
 
 pub fn fold_item(item: WireItem, state: &mut RawState) {
     for (uuid, obj) in item {
-        let Ok(uuid) = uuid.parse::<ThingsId>() else {
+        let Ok(uuid) = ThingsId::from_wire(&uuid) else {
             continue;
         };
         match obj.operation_type {

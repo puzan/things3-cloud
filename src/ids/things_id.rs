@@ -10,16 +10,17 @@ use uuid::Uuid;
 
 /// A Things 3 entity identifier.
 ///
-/// Internally stored as canonical 16 bytes (SHA1-truncated UUID digest).
-/// Hyphenated UUIDs, historical `ACTIONGROUP-<UUID>` IDs, and compact base58
-/// IDs are accepted at parse-time.
+/// Internally stored as canonical 16 bytes. Compact base58 IDs decode to
+/// those bytes directly; any legacy ID (hyphenated UUIDs, `ACTIONGROUP-<UUID>`,
+/// built-in `CC-Things-Tag-*` tags, dated recurring instances, ...) maps to
+/// the first 16 bytes of the SHA1 digest of its exact string, which is how
+/// Things itself references legacy objects after migrating to compact IDs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct ThingsId([u8; 16]);
 
 impl ThingsId {
     pub fn random() -> Self {
-        let uuid = Uuid::from_bytes(random());
-        ThingsId(uuid_to_bytes(&uuid))
+        ThingsId(random())
     }
 
     pub fn as_bytes(&self) -> &[u8; 16] {
@@ -28,6 +29,16 @@ impl ThingsId {
 
     pub fn starts_with(&self, prefix: &str) -> bool {
         self.to_string().starts_with(prefix)
+    }
+
+    /// Parses an ID as found in sync data, where any non-empty string is a
+    /// valid object key. Strings that are not compact IDs are legacy IDs and
+    /// are canonicalized through [`legacy_id_to_bytes`].
+    pub fn from_wire(s: &str) -> Result<Self, ParseThingsIdError> {
+        if s.is_empty() {
+            return Err(ParseThingsIdError(s.to_owned()));
+        }
+        Ok(compact_from_str(s).unwrap_or_else(|| ThingsId(legacy_id_to_bytes(s))))
     }
 }
 
@@ -76,30 +87,23 @@ impl TryFrom<&str> for ThingsId {
 impl FromStr for ThingsId {
     type Err = ParseThingsIdError;
 
+    /// Strict parsing for user input: accepts compact base58 IDs and
+    /// hyphenated UUIDs only. Use [`ThingsId::from_wire`] for sync data.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.is_empty() {
-            return Err(ParseThingsIdError(s.to_owned()));
+        if Uuid::parse_str(s).is_ok() {
+            return Ok(ThingsId(legacy_id_to_bytes(s)));
         }
-
-        // Early Things clients stored project-heading IDs with an
-        // `ACTIONGROUP-` discriminator in both object keys and task
-        // relationships. The UUID suffix identifies the same entity and can
-        // be canonicalized through the normal legacy UUID path.
-        let uuid_candidate = s.strip_prefix("ACTIONGROUP-").unwrap_or(s);
-        if let Ok(uuid) = Uuid::parse_str(uuid_candidate) {
-            return Ok(ThingsId(uuid_to_bytes(&uuid)));
-        }
-        if s.len() > 22 {
-            return Err(ParseThingsIdError(s.to_owned()));
-        }
-        let decoded = base58_decode(s).ok_or_else(|| ParseThingsIdError(s.to_owned()))?;
-        if decoded.len() != 16 {
-            return Err(ParseThingsIdError(s.to_owned()));
-        }
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&decoded);
-        Ok(ThingsId(bytes))
+        compact_from_str(s).ok_or_else(|| ParseThingsIdError(s.to_owned()))
     }
+}
+
+fn compact_from_str(s: &str) -> Option<ThingsId> {
+    if s.is_empty() || s.len() > 22 {
+        return None;
+    }
+    let decoded = base58_decode(s)?;
+    let bytes: [u8; 16] = decoded.try_into().ok()?;
+    Some(ThingsId(bytes))
 }
 
 impl Serialize for ThingsId {
@@ -116,11 +120,11 @@ impl<'de> Deserialize<'de> for ThingsId {
             type Value = ThingsId;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "a Things ID string (compact base58 or hyphenated UUID)")
+                write!(f, "a non-empty Things ID string")
             }
 
             fn visit_str<E: de::Error>(self, v: &str) -> Result<ThingsId, E> {
-                v.parse().map_err(de::Error::custom)
+                ThingsId::from_wire(v).map_err(de::Error::custom)
             }
         }
 
@@ -224,9 +228,10 @@ fn base58_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn uuid_to_bytes(uuid: &Uuid) -> [u8; 16] {
-    let canonical = uuid.to_string().to_uppercase();
-    let digest = Sha1::digest(canonical.as_bytes());
+/// Canonicalizes a legacy ID the way Things does: the exact string is
+/// hashed as-is, without case folding or prefix stripping.
+fn legacy_id_to_bytes(id: &str) -> [u8; 16] {
+    let digest = Sha1::digest(id.as_bytes());
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     bytes
@@ -253,24 +258,68 @@ mod tests {
     }
 
     #[test]
-    fn parse_legacy_uuid_lowercase() {
+    fn parse_legacy_uuid_preserves_case() {
         let upper: ThingsId = LEGACY_UUID.parse().unwrap();
         let lower: ThingsId = LEGACY_UUID_LOWER.parse().unwrap();
-        assert_eq!(upper, lower, "UUID parsing must be case-insensitive");
+        assert_ne!(upper, lower, "legacy IDs are hashed exactly as written");
+    }
+
+    // Expected values below are compact IDs that Things itself uses to
+    // reference these legacy objects after migrating an account.
+    #[test]
+    fn wire_legacy_builtin_tag_matches_things() {
+        let id = ThingsId::from_wire("CC-Things-Tag-Important").unwrap();
+        assert_eq!(id.to_string(), "XdDBCjmEXEhjZy9A2wFFKP");
     }
 
     #[test]
-    fn parse_legacy_action_group_id_as_its_uuid() {
-        let uuid: ThingsId = LEGACY_UUID.parse().unwrap();
-        let action_group: ThingsId = LEGACY_ACTION_GROUP_ID.parse().unwrap();
-        assert_eq!(action_group, uuid);
+    fn wire_legacy_uuid_matches_things() {
+        let id = ThingsId::from_wire("06B6F4C9-A15B-42CF-99A6-0E95E6C30568").unwrap();
+        assert_eq!(id.to_string(), "24NUhbTg95SWrRGiRozmii");
+    }
+
+    #[test]
+    fn wire_legacy_action_group_hashes_full_string() {
+        let action_group = ThingsId::from_wire(LEGACY_ACTION_GROUP_ID).unwrap();
+        assert_eq!(
+            action_group,
+            ThingsId(legacy_id_to_bytes(LEGACY_ACTION_GROUP_ID))
+        );
+        assert_ne!(action_group, LEGACY_UUID.parse().unwrap());
+    }
+
+    #[test]
+    fn wire_accepts_dated_recurring_instance_ids() {
+        let raw = "92B73A64-E993-4C4E-80D4-AE0ACF781612-20190629";
+        let id = ThingsId::from_wire(raw).unwrap();
+        assert_eq!(id, ThingsId(legacy_id_to_bytes(raw)));
+    }
+
+    #[test]
+    fn wire_keeps_compact_ids() {
+        let compact = compact_for_legacy();
+        assert_eq!(
+            ThingsId::from_wire(&compact).unwrap(),
+            compact.parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn wire_rejects_empty_string() {
+        assert!(ThingsId::from_wire("").is_err());
+    }
+
+    #[test]
+    fn strict_parse_rejects_non_uuid_legacy_ids() {
+        assert!("CC-Things-Tag-Important".parse::<ThingsId>().is_err());
+        assert!(LEGACY_ACTION_GROUP_ID.parse::<ThingsId>().is_err());
     }
 
     #[test]
     fn serde_deserialize_legacy_action_group_id() {
         let parsed: ThingsId = serde_json::from_str(&format!(r#""{LEGACY_ACTION_GROUP_ID}""#))
             .expect("deserialize legacy action-group ID");
-        assert_eq!(parsed, LEGACY_UUID.parse().unwrap());
+        assert_eq!(parsed, ThingsId::from_wire(LEGACY_ACTION_GROUP_ID).unwrap());
     }
 
     #[test]
@@ -350,11 +399,7 @@ mod tests {
 
     #[test]
     fn base58_roundtrip_for_internal_bytes() {
-        let samples = [
-            [0u8; 16],
-            [255u8; 16],
-            uuid_to_bytes(&Uuid::parse_str(LEGACY_UUID).unwrap()),
-        ];
+        let samples = [[0u8; 16], [255u8; 16], legacy_id_to_bytes(LEGACY_UUID)];
         for sample in samples {
             let (buf, len) = base58_encode_fixed(&sample);
             let encoded = std::str::from_utf8(&buf[..len]).unwrap().to_owned();
