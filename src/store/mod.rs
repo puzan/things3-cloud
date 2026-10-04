@@ -11,7 +11,7 @@ pub use entities::{
     Area, AreaStateProps, ChecklistItem, ChecklistItemStateProps, ProjectProgress, StateObject,
     StateProperties, Tag, TagStateProps, Task, TaskStateProps,
 };
-pub use state::{RawState, fold_item, fold_items};
+pub use state::{FoldState, RawState, fold_item, fold_items};
 
 use crate::{
     ids::{

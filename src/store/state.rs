@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
 
 use crate::{
     ids::ThingsId,
@@ -16,6 +18,18 @@ use crate::{
 };
 
 pub type RawState = HashMap<ThingsId, StateObject>;
+
+/// Folding progress: live objects plus IDs whose latest operation was a delete.
+///
+/// History carries updates for objects it never created, so an update to an
+/// unknown ID creates it. Things ignores updates to deleted objects, though,
+/// so tombstones keep those from resurrecting them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FoldState {
+    pub objects: RawState,
+    #[serde(default)]
+    pub deleted: HashSet<ThingsId>,
+}
 
 fn apply_task_patch(task: &mut TaskStateProps, patch: TaskPatch) {
     if let Some(title) = patch.title {
@@ -188,13 +202,15 @@ fn apply_update_payload(existing: &mut StateObject, payload: Properties) {
     }
 }
 
-pub fn fold_item(item: WireItem, state: &mut RawState) {
+pub fn fold_item(item: WireItem, fold: &mut FoldState) {
+    let state = &mut fold.objects;
     for (uuid, obj) in item {
         let Ok(uuid) = ThingsId::from_wire(&uuid) else {
             continue;
         };
         match obj.operation_type {
             OperationType::Create => {
+                fold.deleted.remove(&uuid);
                 insert_state_object(state, uuid, obj);
             }
             OperationType::Update => {
@@ -205,12 +221,13 @@ pub fn fold_item(item: WireItem, state: &mut RawState) {
                     if obj.entity_type.is_some() {
                         existing.entity_type = obj.entity_type.clone();
                     }
-                } else {
+                } else if !fold.deleted.contains(&uuid) {
                     insert_state_object(state, uuid, obj);
                 }
             }
             OperationType::Delete => {
                 state.remove(&uuid);
+                fold.deleted.insert(uuid);
             }
             OperationType::Unknown(_) => {}
         }
@@ -218,11 +235,11 @@ pub fn fold_item(item: WireItem, state: &mut RawState) {
 }
 
 pub fn fold_items(items: impl IntoIterator<Item = WireItem>) -> RawState {
-    let mut state = RawState::new();
+    let mut fold = FoldState::default();
     for item in items {
-        fold_item(item, &mut state);
+        fold_item(item, &mut fold);
     }
-    state
+    fold.objects
 }
 
 #[cfg(test)]
@@ -403,5 +420,69 @@ mod tests {
 
         assert_eq!(properties.status, TaskStatus::Incomplete);
         assert_eq!(properties.stop_date, None);
+    }
+
+    #[test]
+    fn update_after_delete_does_not_resurrect_object() {
+        let delete = wire_item(&format!(
+            r#"{{"{TASK_ID}":{{"t":2,"e":"Task6","p":{{}}}}}}"#
+        ));
+        let update = wire_item(&format!(
+            r#"{{"{TASK_ID}":{{"t":1,"e":"Task6","p":{{"tt":"Renamed"}}}}}}"#
+        ));
+
+        let state = fold_items([task6_create(), delete, update]);
+
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn create_after_delete_restores_object() {
+        let delete = wire_item(&format!(
+            r#"{{"{TASK_ID}":{{"t":2,"e":"Task6","p":{{}}}}}}"#
+        ));
+        let update = wire_item(&format!(
+            r#"{{"{TASK_ID}":{{"t":1,"e":"Task6","p":{{"tt":"Renamed"}}}}}}"#
+        ));
+
+        let state = fold_items([task6_create(), delete, task6_create(), update]);
+        let task_id = TASK_ID.parse::<ThingsId>().expect("valid task id");
+        let StateProperties::Task(properties) = &state[&task_id].properties else {
+            panic!("task state should be restored");
+        };
+
+        assert_eq!(properties.title, "Renamed");
+    }
+
+    #[test]
+    fn update_for_never_created_object_creates_it() {
+        let update = wire_item(&format!(
+            r#"{{"{TASK_ID}":{{"t":1,"e":"Task6","p":{{"tt":"From update","tp":0,"ss":0,"st":1}}}}}}"#
+        ));
+
+        let state = fold_items([update]);
+        let task_id = TASK_ID.parse::<ThingsId>().expect("valid task id");
+
+        assert!(state.contains_key(&task_id));
+    }
+
+    #[test]
+    fn tombstones_survive_serialization() {
+        let delete = wire_item(&format!(
+            r#"{{"{TASK_ID}":{{"t":2,"e":"Task6","p":{{}}}}}}"#
+        ));
+        let mut fold = FoldState::default();
+        fold_item(task6_create(), &mut fold);
+        fold_item(delete, &mut fold);
+
+        let json = serde_json::to_string(&fold).expect("fold state should serialize");
+        let mut fold: FoldState =
+            serde_json::from_str(&json).expect("fold state should deserialize");
+        let update = wire_item(&format!(
+            r#"{{"{TASK_ID}":{{"t":1,"e":"Task6","p":{{"tt":"Renamed"}}}}}}"#
+        ));
+        fold_item(update, &mut fold);
+
+        assert!(fold.objects.is_empty());
     }
 }

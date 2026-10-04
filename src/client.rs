@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use urlencoding::encode;
 
 use crate::{
-    store::{RawState, fold_item},
+    store::{FoldState, RawState, fold_item},
     wire::wire_object::{WireItem, WireObject},
 };
 
@@ -135,7 +135,7 @@ impl ThingsCloudClient {
             let _ = self.authenticate()?;
         }
 
-        let mut state = RawState::new();
+        let mut fold = FoldState::default();
         let mut start_index = 0i64;
 
         loop {
@@ -153,7 +153,7 @@ impl ThingsCloudClient {
 
             for item in items {
                 let wire: WireItem = serde_json::from_value(item)?;
-                fold_item(wire, &mut state);
+                fold_item(wire, &mut fold);
             }
 
             let end = page
@@ -170,7 +170,7 @@ impl ThingsCloudClient {
             start_index += item_count as i64;
         }
 
-        Ok(state)
+        Ok(fold.objects)
     }
 
     pub fn commit(

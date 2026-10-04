@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::{
     client::ThingsCloudClient,
     dirs::create_private_dir,
-    store::{RawState, fold_item},
+    store::{FoldState, RawState, fold_item},
     wire::wire_object::WireItem,
 };
 
@@ -34,10 +34,11 @@ struct StateCacheData {
     #[serde(default)]
     version: u8,
     log_offset: u64,
-    state: RawState,
+    #[serde(flatten)]
+    fold: FoldState,
 }
 
-const STATE_CACHE_VERSION: u8 = 4;
+const STATE_CACHE_VERSION: u8 = 5;
 
 fn read_cursor(path: &Path) -> CursorData {
     if !path.exists() {
@@ -149,31 +150,31 @@ pub fn sync_append_log(client: &mut ThingsCloudClient, cache_dir: &Path) -> Resu
     Ok(())
 }
 
-fn read_state_cache(cache_dir: &Path) -> (RawState, u64) {
+fn read_state_cache(cache_dir: &Path) -> (FoldState, u64) {
     let path = cache_dir.join("state_cache.json");
     if !path.exists() {
-        return (RawState::new(), 0);
+        return (FoldState::default(), 0);
     }
     let Ok(raw) = fs::read_to_string(&path) else {
-        return (RawState::new(), 0);
+        return (FoldState::default(), 0);
     };
     let Ok(cache) = serde_json::from_str::<StateCacheData>(&raw) else {
-        return (RawState::new(), 0);
+        return (FoldState::default(), 0);
     };
 
     if cache.version != STATE_CACHE_VERSION {
-        return (RawState::new(), 0);
+        return (FoldState::default(), 0);
     }
 
-    (cache.state, cache.log_offset)
+    (cache.fold, cache.log_offset)
 }
 
-fn write_state_cache(cache_dir: &Path, state: &RawState, log_offset: u64) -> Result<()> {
+fn write_state_cache(cache_dir: &Path, fold: &FoldState, log_offset: u64) -> Result<()> {
     let path = cache_dir.join("state_cache.json");
     let payload = serde_json::to_string(&StateCacheData {
         version: STATE_CACHE_VERSION,
         log_offset,
-        state: state.clone(),
+        fold: fold.clone(),
     })?;
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, payload)?;
@@ -187,7 +188,7 @@ pub fn fold_state_from_append_log(cache_dir: &Path) -> Result<RawState> {
         return Ok(RawState::new());
     }
 
-    let (mut state, byte_offset) = read_state_cache(cache_dir);
+    let (mut fold, byte_offset) = read_state_cache(cache_dir);
     let mut new_lines = 0u64;
 
     let mut file =
@@ -222,16 +223,16 @@ pub fn fold_state_from_append_log(cache_dir: &Path) -> Result<RawState> {
                 error
             )
         })?;
-        fold_item(item, &mut state);
+        fold_item(item, &mut fold);
         new_lines += 1;
         safe_offset = reader.stream_position()?;
     }
 
     if new_lines > 0 {
-        write_state_cache(cache_dir, &state, safe_offset)?;
+        write_state_cache(cache_dir, &fold, safe_offset)?;
     }
 
-    Ok(state)
+    Ok(fold.objects)
 }
 
 pub fn get_state_with_append_log(
@@ -306,7 +307,7 @@ mod tests {
         assert_eq!(task.title, "Current task");
         assert_eq!(task.entity, crate::wire::wire_object::EntityType::Task7);
         let (cached_state, offset) = read_state_cache(cache_dir);
-        assert_eq!(cached_state, state);
+        assert_eq!(cached_state.objects, state);
         assert_eq!(offset, log.len() as u64);
     }
 
