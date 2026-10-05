@@ -280,6 +280,23 @@ impl ThingsStore {
         out
     }
 
+    /// Whether `task` shows in Things' Today view: scheduled for today or
+    /// earlier, and not inside a trashed, completed, or canceled project.
+    /// The evening bit only picks the section; on its own it does not put a
+    /// task in Today.
+    pub fn in_today(&self, task: &Task, today: &DateTime<Utc>) -> bool {
+        if !task.is_today(today) {
+            return false;
+        }
+        let Some(project_uuid) = self.effective_project_uuid(task) else {
+            return true;
+        };
+        let Some(project) = self.tasks_by_uuid.get(&project_uuid) else {
+            return true;
+        };
+        !project.trashed && project.status == TaskStatus::Incomplete
+    }
+
     pub fn today(&self, today: &DateTime<Utc>) -> Vec<Task> {
         let mut out: Vec<Task> = self
             .tasks_by_uuid
@@ -290,7 +307,7 @@ impl ThingsStore {
                     && !t.is_heading()
                     && !t.is_project()
                     && !t.is_blank()
-                    && t.is_today(today)
+                    && self.in_today(t, today)
             })
             .cloned()
             .collect();

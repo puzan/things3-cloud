@@ -437,7 +437,7 @@ fn matches(
     if args.inbox && task.start != TaskStart::Inbox {
         return MatchResult::no();
     }
-    if args.today && !task.is_today(today) {
+    if args.today && !store.in_today(task, today) {
         return MatchResult::no();
     }
     if args.someday && !task.in_someday() {

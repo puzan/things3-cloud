@@ -86,7 +86,7 @@ fn build_reorder_plan(
     }
 
     let is_today_orderable = |task: &crate::store::Task| {
-        task.start == TaskStart::Anytime && (task.is_today(&today) || task.evening)
+        task.start == TaskStart::Anytime && store.in_today(task, &today)
     };
     let is_today_reorder = is_today_orderable(&item) && is_today_orderable(&anchor);
 

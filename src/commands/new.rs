@@ -307,7 +307,7 @@ fn build_new_plan(
 
     let anchor_is_today = anchor
         .as_ref()
-        .map(|a| a.start == TaskStart::Anytime && (a.is_today(&today) || a.evening))
+        .map(|a| a.start == TaskStart::Anytime && store.in_today(a, &today))
         .unwrap_or(false);
     let target_bucket = props_bucket(&props);
 
@@ -370,7 +370,7 @@ fn build_new_plan(
                 !t.trashed
                     && t.status == TaskStatus::Incomplete
                     && t.start == TaskStart::Anytime
-                    && (t.is_today(&today) || t.evening)
+                    && store.in_today(t, &today)
                     && (if t.evening { 1 } else { 0 }) == section_evening
             })
             .cloned()
